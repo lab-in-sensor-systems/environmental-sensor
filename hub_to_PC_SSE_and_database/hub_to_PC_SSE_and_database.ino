@@ -18,8 +18,8 @@
 #include <NMEA_data.h>
 
 // ====== WiFi Configuration ======
-const char* ssid = "REPLACE_WITH_YOUR_SSID";
-const char* password = "REPLACE_WITH_YOUR_PASSWORD";
+const char* ssid = "...";
+const char* password = "WifiIsOff";
 
 // ====== Web Server and SSE ======
 AsyncWebServer server(80);
@@ -62,8 +62,7 @@ void initBME() {
 // ====== GPS Initialization ======
 void initGPS() {
   if (!gps.begin(0x10)) { // PA1010D's I2C address is fixed at 0x10
-    Serial.println(F("Could not find a valid GPS, check wiring!"));
-    while (1);
+    Serial.println(F("Could not find a valid GPS!"));
   }
   gps.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA); // Get RMC & GGA sentences
   gps.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);    // Push out new data every 1s
@@ -76,9 +75,9 @@ void initGPS() {
 void initWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi ..");
+  Serial.printf("Connecting to WiFi ..");
   while (WiFi.status() != WL_CONNECTED) {
-    Serial.print('.');
+    Serial.printf("x");
     delay(1000);
   }
   Serial.print("\nConnected! IP address: ");
@@ -200,7 +199,7 @@ String processor(const String& var) {
 
 // ====== SETUP Function ======
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600); 
   initWiFi();
   initBME();
   initGPS();
