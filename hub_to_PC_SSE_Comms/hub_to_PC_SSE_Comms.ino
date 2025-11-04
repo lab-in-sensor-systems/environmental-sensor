@@ -1,24 +1,29 @@
 /*
-Code edited from https://randomnerdtutorials.com/esp32-bme680-sensor-arduino/
-and https://randomnerdtutorials.com/esp32-web-server-sent-events-sse/ 
+  Merged BME680 Web Server (SSE) and HTTP POST Reporter for Python SQLite Logging
+
+  Based on Random Nerd Tutorials and custom HTTP client for DB logging.
 */
 
-#include <Wire.h>  
+#include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME680.h>
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+#include <HTTPClient.h>
 
 // ======== WiFi Configuration ========
 const char* ssid = "REPLACE_WITH_YOUR_SSID";
 const char* password = "REPLACE_WITH_YOUR_PASSWORD";
 
+// ======== Python Server Endpoint ========
+const char* serverURL = "http://192.168.1.100:5050/upload"; // <-- Update with your PC/server IP
+
 // ======== Web Server and SSE ========
 AsyncWebServer server(80);
 AsyncEventSource events("/events");
 
-// ======== BME688 Setup ========
+// ======== BME688/BME680 Setup ========
 #define SEALEVELPRESSURE_HPA (1007.03)
 Adafruit_BME680 bme; // I2C
 
@@ -60,16 +65,15 @@ void initWiFi() {
 
 // ======== Sensor Reading Function =========
 bool getSensorReadings() {
-  // Start async reading
   unsigned long endTime = bme.beginReading();
   if (endTime == 0) {
-    Serial.println(F("Failed to begin BME688 reading :("));
+    Serial.println(F("Failed to begin BME680 reading :("));
     return false;
   }
 
-  delay(50); // Simulate parallel work, optional
+  delay(50); // Simulate parallel work
   if (!bme.endReading()) {
-    Serial.println(F("Failed to complete BME688 reading :("));
+    Serial.println(F("Failed to complete BME680 reading :("));
     return false;
   }
 
@@ -82,7 +86,27 @@ bool getSensorReadings() {
   return true;
 }
 
-// ======== Template HTML (from your example) =========
+// ======== HTTP POST Function =========
+void sendDataToServer() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(serverURL);
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    String payload = "temperature=" + String(temperature) +
+                     "&humidity=" + String(humidity) +
+                     "&pressure=" + String(pressure) +
+                     "&gas=" + String(gas) +
+                     "&altitude=" + String(altitude);
+    int httpResponseCode = http.POST(payload);
+    Serial.print("HTTP POST Response code: ");
+    Serial.println(httpResponseCode);
+    http.end();
+  } else {
+    Serial.println("WiFi not connected, cannot send data.");
+  }
+}
+
+// ======== Template HTML for SSE Web Page =========
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html>
 <head>
@@ -132,7 +156,6 @@ const char index_html[] PROGMEM = R"rawliteral(
 <script>
 if (!!window.EventSource) {
  var source = new EventSource('/events');
- 
  source.addEventListener('open', function(e) {
   console.log("Events Connected");
  }, false);
@@ -141,23 +164,18 @@ if (!!window.EventSource) {
     console.log("Events Disconnected");
   }
  }, false);
- 
  source.addEventListener('temperature', function(e) {
   document.getElementById("temp").innerHTML = e.data;
  }, false);
- 
  source.addEventListener('humidity', function(e) {
   document.getElementById("hum").innerHTML = e.data;
  }, false);
- 
  source.addEventListener('pressure', function(e) {
   document.getElementById("pres").innerHTML = e.data;
  }, false);
-
  source.addEventListener('gas', function(e) {
   document.getElementById("gas").innerHTML = e.data;
  }, false);
-
  source.addEventListener('altitude', function(e) {
   document.getElementById("alt").innerHTML = e.data;
  }, false);
@@ -214,6 +232,9 @@ void loop() {
       events.send(String(pressure).c_str(), "pressure", millis());
       events.send(String(gas).c_str(), "gas", millis());
       events.send(String(altitude).c_str(), "altitude", millis());
+
+      // ALSO send the reading to your database, via Python HTTP logger
+      sendDataToServer();
     }
     lastTime = millis();
   }
