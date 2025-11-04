@@ -11,8 +11,8 @@ and https://randomnerdtutorials.com/esp32-web-server-sent-events-sse/
 #include <ESPAsyncWebServer.h>
 
 // ======== WiFi Configuration ========
-const char* ssid = "REPLACE_WITH_YOUR_SSID";
-const char* password = "REPLACE_WITH_YOUR_PASSWORD";
+const char* ssid = "Adriana";
+const char* password = "1234567890";
 
 // ======== Web Server and SSE ========
 AsyncWebServer server(80);
@@ -49,12 +49,12 @@ void initBME() {
 void initWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi ..");
+  Serial.printf("Connecting to WiFi ..");
   while (WiFi.status() != WL_CONNECTED) {
-    Serial.print('.');
+    Serial.printf(".");
     delay(1000);
   }
-  Serial.print("\nConnected! IP address: ");
+  Serial.printf("\nConnected! IP address: ");
   Serial.println(WiFi.localIP());
 }
 
