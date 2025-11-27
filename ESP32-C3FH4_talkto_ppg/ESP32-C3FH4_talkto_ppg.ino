@@ -1,94 +1,122 @@
 #include <Wire.h>
-#include "MAX30105.h"            // SparkFun MAX3010x library
-#include "spo2_algorithm.h"      // Maxim's SpO2/HR algorithm
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
+#include "MAX30105.h"
+#include "spo2_algorithm.h"
 
 MAX30105 particleSensor;
 
-// Choose buffer width per SparkFun/Maxim examples (100 samples is common)
-#if defined(__AVR_ATmega328P__) || defined(__AVR_ATmega168__)
-  uint16_t irBuffer[100];
-  uint16_t redBuffer[100];
-#else
-  uint32_t irBuffer[100];
-  uint32_t redBuffer[100];
-#endif
+// Buffers for Maxim algorithm
+uint32_t irBuffer[100];
+uint32_t redBuffer[100];
+int32_t bufferLength = 100;
+int32_t spo2 = 0, heartRate = 0;
+int8_t validSPO2 = 0, validHeartRate = 0;
 
-int32_t bufferLength = 100;       // Samples in buffer
-int32_t spo2 = 0;                 // SpO2 result
-int8_t validSPO2 = 0;             // SpO2 validity flag
-int32_t heartRate = 0;            // HR result
-int8_t validHeartRate = 0;        // HR validity flag
+// BLE UUIDs
+#define SERVICE_UUID        "d3aa6a66-a623-4c76-80a5-a66004acf0bf"
+#define CHARACTERISTIC_UUID "2df03c7d-8ac5-493e-9d88-ac467aed4ad0"
+
+BLECharacteristic *pCharacteristic;
+
+unsigned long lastNotifyTime = 0;
+const unsigned long notifyInterval = 1000; // ms
 
 void setup() {
   Serial.begin(115200);
-  // ESP32-C3 default I2C pins are often SDA=5, SCL=6; adjust to your wiring if different.
-  Wire.begin(); // or Wire.begin(SDA_PIN, SCL_PIN, 400000)
 
-  // Initialize MAX30102
+  // I2C + MAX30102
+  Wire.begin(); // adjust SDA/SCL if needed
+
   if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
-    Serial.println("MAX3010x not found. Check wiring/power/I2C.");
-    while (1) { delay(1000); }
+    Serial.println("MAX3010x Sensor not found!");
+    while (1);
   }
 
-  // Configure recommended settings for SpO2: Red+IR, suitable SR, PW, ADC range
-  byte ledBrightness = 60;   // 0..255 (50mA at 255). Tune for your module.
-  byte sampleAverage = 4;    // 1, 2, 4, 8, 16, 32
-  byte ledMode = 2;          // 2 = Red + IR (required for SpO2)
-  byte sampleRate = 100;     // 50..3200 sps; 100sps commonly used
-  int pulseWidth = 411;      // 69, 118, 215, 411 us (longer = higher resolution)
-  int adcRange = 4096;       // 2048, 4096, 8192, 16384 nA
+  // MAX30102 recommended settings
+  byte ledBrightness = 60;
+  byte sampleAverage = 4;
+  byte ledMode = 2;       // Red + IR
+  byte sampleRate = 100;
+  int pulseWidth = 411;
+  int adcRange = 4096;
+
   particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
 
-  Serial.println("Attach finger on sensor and keep still...");
+  // BLE setup
+  BLEDevice::init("ESP32_SPO2_SERVER");
+  BLEServer *server = BLEDevice::createServer();
+  BLEService *service = server->createService(SERVICE_UUID);
+
+  pCharacteristic = service->createCharacteristic(
+    CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+  );
+
+  pCharacteristic->addDescriptor(new BLE2902());
+  service->start();
+  server->getAdvertising()->start();
+
+  Serial.println("BLE Server Started. Waiting for client...");
+
+  // ---- Prime initial 100 samples ----
+  for (int i = 0; i < bufferLength; i++) {
+    while (!particleSensor.available()) particleSensor.check();
+    redBuffer[i] = particleSensor.getRed();
+    irBuffer[i] = particleSensor.getIR();
+    particleSensor.nextSample();
+  }
+
+  // Initial HR + SpO2 computation
+  maxim_heart_rate_and_oxygen_saturation(
+    irBuffer, bufferLength,
+    redBuffer,
+    &spo2, &validSPO2,
+    &heartRate, &validHeartRate
+  );
 }
 
 void loop() {
-  // Prime initial 100 samples (about 1–2 s depending on SR)
-  for (int i = 0; i < bufferLength; i++) {
-    while (particleSensor.available() == false) {
-      particleSensor.check();
-    }
-    redBuffer[i] = particleSensor.getRed();
-    irBuffer[i]  = particleSensor.getIR();
-    particleSensor.nextSample();
-
-    // Optional: print raw for debugging
-    // Serial.printf("red=%lu, ir=%lu\r\n", (unsigned long)redBuffer[i], (unsigned long)irBuffer[i]);
+  // ---- Sliding window: every 25 new samples ----
+  for (int i = 25; i < 100; i++) {
+    redBuffer[i - 25] = redBuffer[i];
+    irBuffer[i - 25] = irBuffer[i];
   }
 
-  // Compute initial HR and SpO2
-  maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength,
-                                         redBuffer, &spo2, &validSPO2,
-                                         &heartRate, &validHeartRate);
+  for (int i = 75; i < 100; i++) {
+    while (!particleSensor.available()) particleSensor.check();
+    redBuffer[i] = particleSensor.getRed();
+    irBuffer[i] = particleSensor.getIR();
+    particleSensor.nextSample();
+  }
 
-  // Continuous update: every 25 new samples, recompute on sliding window
-  while (true) {
-    // Shift 75 samples up, discard oldest 25
-    for (int i = 25; i < 100; i++) {
-      redBuffer[i - 25] = redBuffer[i];
-      irBuffer[i - 25]  = irBuffer[i];
-    }
+  // Compute HR + SpO2
+  maxim_heart_rate_and_oxygen_saturation(
+    irBuffer, bufferLength,
+    redBuffer,
+    &spo2, &validSPO2,
+    &heartRate, &validHeartRate
+  );
 
-    // Acquire 25 new samples
-    for (int i = 75; i < 100; i++) {
-      while (particleSensor.available() == false) {
-        particleSensor.check();
-      }
-      redBuffer[i] = particleSensor.getRed();
-      irBuffer[i]  = particleSensor.getIR();
-      particleSensor.nextSample();
-    }
+  // Print to Serial for debugging
+  Serial.printf("HR=%ld valid=%d | SpO2=%ld valid=%d\n",
+        heartRate, validHeartRate, spo2, validSPO2);
 
-    // Recompute HR and SpO2
-    maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength,
-                                           redBuffer, &spo2, &validSPO2,
-                                           &heartRate, &validHeartRate);
+  // ---- BLE Notification (once per second) ----
+  unsigned long now = millis();
+  if (now - lastNotifyTime >= notifyInterval) {
+    lastNotifyTime = now;
 
-    // Print labeled, newline-terminated output
-    Serial.printf("IR=%lu, RED=%lu, HR=%ld, HRvalid=%d, SpO2=%ld, SpO2valid=%d\r\n",
-                  (unsigned long)irBuffer[99],
-                  (unsigned long)redBuffer[99],
-                  (long)heartRate, (int)validHeartRate,
-                  (long)spo2, (int)validSPO2);
+    uint8_t packet[4];
+    packet[0] = (uint8_t)heartRate;
+    packet[1] = validHeartRate;
+    packet[2] = (uint8_t)spo2;
+    packet[3] = validSPO2;
+
+    pCharacteristic->setValue(packet, 4);
+    pCharacteristic->notify();
   }
 }
