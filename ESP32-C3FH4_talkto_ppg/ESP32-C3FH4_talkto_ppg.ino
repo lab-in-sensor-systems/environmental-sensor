@@ -20,6 +20,9 @@ int8_t validSPO2 = 0, validHeartRate = 0;
 #define SERVICE_UUID        "d3aa6a66-a623-4c76-80a5-a66004acf0bf"
 #define CHARACTERISTIC_UUID "2df03c7d-8ac5-493e-9d88-ac467aed4ad0"
 
+//BLE server name
+#define bleServerName "ppg"
+
 BLECharacteristic *pCharacteristic;
 
 unsigned long lastNotifyTime = 0;
@@ -47,7 +50,7 @@ void setup() {
   particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
 
   // BLE setup
-  BLEDevice::init("ESP32_SPO2_SERVER");
+  BLEDevice::init(bleServerName);
   BLEServer *server = BLEDevice::createServer();
   BLEService *service = server->createService(SERVICE_UUID);
 
