@@ -20,12 +20,19 @@
 // ======== HTTP Client ========
 #include <HTTPClient.h>
 
+// ======== BLE Client Includes ========
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
+#include <BLEClient.h>
+#include <BLERemoteCharacteristic.h>
+
 // ======== WiFi Configuration ========
 const char* ssid     = "Adriana";
 const char* password = "1234567890";
 
-// ======== Python Server Endpoint (your laptop) ========
-const char* serverURL = "http://172.20.10.4:5050/upload";  // adjust if your PC IP changes
+// ======== Python Server Endpoint ========
+const char* serverURL = "http://172.20.10.4:5050/upload";
 
 // ======== Web Server and SSE ========
 AsyncWebServer server(80);
@@ -53,39 +60,92 @@ bool gpsHasFix = false;
 // ======== ToF Setup (VL53L4CX) ========
 VL53L4CX sensor_vl53l4cx_sat;
 TwoWire *TOF_I2C = &Wire;
-#define XSHUT_PIN A1  // adjust to your actual XSHUT pin
+#define XSHUT_PIN A1
 
 float tofDistance = NAN; // mm
 uint8_t tof_status = VL53L4CX_RANGESTATUS_NONE;
 
 // Timing
 unsigned long lastTime   = 0;
-unsigned long timerDelay = 2000;  // every 2 seconds
+unsigned long timerDelay = 2000;
 
 // ======== OLED Setup (SSD1306) ========
 #define SCREEN_WIDTH  128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET    -1
-#define OLED_ADDR     0x3D       // from your I2C scanner
+#define OLED_ADDR     0x3D
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// ======== BLE Client Setup ========
+#define SERVER_SERVICE_UUID        "d3aa6a66-a623-4c76-80a5-a66004acf0bf"
+#define SERVER_CHARACTERISTIC_UUID "2df03c7d-8ac5-493e-9d88-ac467aed4ad0"
+
+BLEClient*  pClient;
+BLERemoteCharacteristic* pRemoteCharacteristic;
+bool doConnect = false;
+bool connected = false;
+bool doScan = false;
+
+// HR + SpO2 readings
+uint8_t heartRate = 0;
+uint8_t hrValid   = 0;
+uint8_t spo2      = 0;
+uint8_t spo2Valid = 0;
 
 // Forward declarations
 void updateDisplay();
 void sendDataToServer();
 
-// ======== OLED Initialization =========
-void initDisplay() {
-  Serial.println(F("Initialising OLED..."));
+// ======== BLE Notification Callback ========
+static void notifyCallback(
+  BLERemoteCharacteristic* pBLERemoteCharacteristic,
+  uint8_t* pData,
+  size_t length,
+  bool isNotify
+) {
+  if (length >= 4) {
+    heartRate = pData[0];
+    hrValid   = pData[1];
+    spo2      = pData[2];
+    spo2Valid = pData[3];
+    Serial.printf("HR=%d valid=%d | SpO2=%d valid=%d\n", heartRate, hrValid, spo2, spo2Valid);
+  }
+}
 
+// ======== BLE Connect Function ========
+bool connectToServer() {
+  BLEScan* pBLEScan = BLEDevice::getScan();
+  pBLEScan->setActiveScan(true);
+  BLEScanResults foundDevices = pBLEScan->start(5);
+
+  for (int i = 0; i < foundDevices.getCount(); i++) {
+    BLEAdvertisedDevice device = foundDevices.getDevice(i);
+    if (device.haveServiceUUID() && device.isAdvertisingService(BLEUUID(SERVER_SERVICE_UUID))) {
+      Serial.println("Found MAX30102 sensor node!");
+      pClient = BLEDevice::createClient();
+      pClient->connect(&device);
+      BLERemoteService* pRemoteService = pClient->getService(BLEUUID(SERVER_SERVICE_UUID));
+      if (pRemoteService == nullptr) return false;
+      pRemoteCharacteristic = pRemoteService->getCharacteristic(BLEUUID(SERVER_CHARACTERISTIC_UUID));
+      if (pRemoteCharacteristic == nullptr) return false;
+      if (pRemoteCharacteristic->canNotify()) {
+        pRemoteCharacteristic->registerForNotify(notifyCallback);
+      }
+      connected = true;
+      return true;
+    }
+  }
+  return false;
+}
+
+// ======== Display, BME, GPS, ToF, WiFi Initialization =========
+void initDisplay() {
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-    Serial.println(F("SSD1306 OLED init failed. Check address and wiring."));
     oledReady = false;
     return;
   }
-
   oledReady = true;
-
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
@@ -95,173 +155,64 @@ void initDisplay() {
   display.display();
 }
 
-// ======== BME688 Initialization =========
 void initBME() {
-  Serial.println(F("Initialising BME688..."));
-
-  if (!bme.begin()) {
-    Serial.println(F("Could not find a valid BME680/BME688 sensor, check wiring!"));
-    bmeReady = false;
-
-    if (oledReady) {
-      display.clearDisplay();
-      display.setTextSize(1);
-      display.setTextColor(SSD1306_WHITE);
-      display.setCursor(0, 0);
-      display.println(F("BME688 Monitor"));
-      display.println(F("OLED OK"));
-      display.println(F("BME FAIL"));
-      display.display();
-    }
-    return;
-  }
-
-  // BME configuration
+  if (!bme.begin()) { bmeReady = false; return; }
   bme.setTemperatureOversampling(BME680_OS_8X);
   bme.setHumidityOversampling(BME680_OS_2X);
   bme.setPressureOversampling(BME680_OS_4X);
   bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
-  bme.setGasHeater(320, 150); // 320°C for 150 ms
-
+  bme.setGasHeater(320, 150);
   bmeReady = true;
-  Serial.println(F("BME688 initialised OK."));
-
-  if (oledReady) {
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.println(F("BME688 Monitor"));
-    display.println(F("OLED OK"));
-    display.println(F("BME OK"));
-    display.display();
-  }
 }
 
-// ======== GPS Initialization =========
 void initGPS() {
-  Serial.println(F("Initialising GPS..."));
-  if (!gps.begin(0x10)) { // PA1010D fixed I2C address
-    Serial.println(F("Could not find a valid GPS!"));
-    return;
-  }
-  gps.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA); // RMC + GGA sentences
-  gps.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);    // 1 Hz updates
-  gps.sendCommand(PGCMD_ANTENNA);               // optional antenna info
+  if (!gps.begin(0x10)) return;
+  gps.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
+  gps.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
+  gps.sendCommand(PGCMD_ANTENNA);
   delay(1000);
   gps.println(PMTK_Q_RELEASE);
-  Serial.println(F("GPS initialised."));
 }
 
-// ======== ToF Initialization =========
 void initToF() {
-  Serial.println(F("Initialising VL53L4CX ToF..."));
   TOF_I2C->begin();
-
   sensor_vl53l4cx_sat.setI2cDevice(TOF_I2C);
   sensor_vl53l4cx_sat.setXShutPin(XSHUT_PIN);
-
   VL53L4CX_Error error = sensor_vl53l4cx_sat.InitSensor(VL53L4CX_DEFAULT_DEVICE_ADDRESS);
-  if (error != VL53L4CX_ERROR_NONE) {
-    Serial.print(F("Error initialising VL53L4CX: "));
-    Serial.println(error);
-    return;
-  }
-
+  if (error) return;
   sensor_vl53l4cx_sat.VL53L4CX_StartMeasurement();
-  Serial.println(F("VL53L4CX initialised successfully!"));
 }
 
-// ======== WiFi Connection =========
 void initWiFi() {
-  Serial.println(F("Connecting to WiFi..."));
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi ..");
-  while (WiFi.status() != WL_CONNECTED) {
-    Serial.print(".");
-    delay(1000);
-  }
-  Serial.println();
-  Serial.print("Connected! IP address: ");
-  Serial.println(WiFi.localIP());
+  while (WiFi.status() != WL_CONNECTED) delay(1000);
   wifiReady = true;
-
-  if (oledReady) {
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.println(F("BME688 Monitor"));
-    display.println(F("OLED OK"));
-    display.println(F("BME OK"));
-    display.println(F("WiFi OK:"));
-    display.println(WiFi.localIP().toString());
-    display.display();
-  }
 }
 
-// ======== Update OLED with current sensor values =========
+// ======== Update OLED Display =========
 void updateDisplay() {
   if (!oledReady) return;
-
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
-
-  if (!bmeReady) {
-    display.println(F("BME688 not ready"));
-    display.display();
-    return;
-  }
-
   display.println(F("BME688 Monitor"));
 
-  display.print(F("T: "));
-  display.print(temperature, 1);
-  display.println(F(" C"));
+  display.printf("T: %.1f C\nH: %.1f %%\nP: %.1f hPa\nGas: %.2f kOhm\nAlt: %.1f m\n", 
+                 temperature, humidity, pressure, gas, altitude);
 
-  display.print(F("H: "));
-  display.print(humidity, 1);
-  display.println(F(" %"));
+  display.printf("HR: %d %s\nSpO2: %d %s\n", heartRate, hrValid?"OK":"NA", spo2, spo2Valid?"OK":"NA");
 
-  display.print(F("P: "));
-  display.print(pressure, 1);
-  display.println(F(" hPa"));
-
-  display.print(F("Gas: "));
-  display.print(gas, 2);
-  display.println(F(" kOhm"));
-
-  display.print(F("Alt: "));
-  display.print(altitude, 1);
-  display.println(F(" m"));
-
-  display.print(F("ToF: "));
-  if (isnan(tofDistance)) {
-    display.println(F("--"));
-  } else {
-    display.print(tofDistance, 0);
-    display.println(F(" mm"));
-  }
+  if (!isnan(tofDistance)) display.printf("ToF: %.0f mm\n", tofDistance);
 
   display.display();
 }
 
-// ======== BME Sensor Reading Function (simple) =========
+// ======== Read Sensors =========
 bool getSensorReadings() {
-  if (!bmeReady) {
-    Serial.println(F("getSensorReadings() called but BME not ready."));
-    return false;
-  }
-
-  Serial.println(F("Taking BME688 reading..."));
-
-  if (!bme.performReading()) {
-    Serial.println(F("Failed to perform BME688 reading :("));
-    return false;
-  }
+  if (!bmeReady) return false;
+  if (!bme.performReading()) return false;
 
   temperature = bme.temperature;
   pressure    = bme.pressure / 100.0;
@@ -269,21 +220,13 @@ bool getSensorReadings() {
   gas         = bme.gas_resistance / 1000.0;
   altitude    = bme.readAltitude(SEALEVELPRESSURE_HPA);
 
-  Serial.printf("T = %.2f C, H = %.2f %%, P = %.2f hPa, Gas = %.2f kOhm, Alt = %.2f m\n",
-                temperature, humidity, pressure, gas, altitude);
-
-  updateDisplay();  // refresh OLED with new values
-
+  updateDisplay();
   return true;
 }
 
-// ======== GPS Reading Function =========
 void getGPSReadings() {
   char c = gps.read();
-  if (gps.newNMEAreceived()) {
-    if (!gps.parse(gps.lastNMEA())) return;
-  }
-
+  if (gps.newNMEAreceived()) if (!gps.parse(gps.lastNMEA())) return;
   gpsHasFix = gps.fix;
   if (gpsHasFix) {
     gpsLat = gps.latitude;
@@ -292,7 +235,6 @@ void getGPSReadings() {
   }
 }
 
-// ======== ToF Reading Function =========
 bool getToFReading() {
   uint8_t NewDataReady = 0;
   VL53L4CX_MultiRangingData_t data;
@@ -308,173 +250,103 @@ bool getToFReading() {
       (pData->RangeData[0].RangeStatus == VL53L4CX_RANGESTATUS_RANGE_VALID ||
        pData->RangeData[0].RangeStatus == VL53L4CX_RANGESTATUS_RANGE_VALID_MERGED_PULSE)) {
     tofDistance = pData->RangeData[0].RangeMilliMeter;
-  } else {
-    tofDistance = NAN;
-  }
+  } else tofDistance = NAN;
 
   sensor_vl53l4cx_sat.VL53L4CX_ClearInterruptAndStartMeasurement();
   return true;
 }
 
-// ======== HTTP POST Function (send data to Python server) =========
+// ======== HTTP POST =========
 void sendDataToServer() {
-  if (!wifiReady) {
-    Serial.println("WiFi not ready, cannot send data.");
-    return;
-  }
+  if (!wifiReady || WiFi.status() != WL_CONNECTED) return;
 
-  if (WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
-    http.begin(serverURL);
-    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  HTTPClient http;
+  http.begin(serverURL);
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
 
-    String payload = "temperature=" + String(temperature) +
-                     "&humidity=" + String(humidity) +
-                     "&pressure=" + String(pressure) +
-                     "&gas=" + String(gas) +
-                     "&altitude=" + String(altitude) +
-                     "&gps_lat=" + String(gpsLat, 6) +
-                     "&gps_lon=" + String(gpsLon, 6) +
-                     "&gps_alt=" + String(gpsAlt, 2) +
-                     "&gps_fix=" + String(gpsHasFix ? 1 : 0) +
-                     "&tof_distance=" + String(tofDistance);
+  String payload = "temperature=" + String(temperature) +
+                   "&humidity=" + String(humidity) +
+                   "&pressure=" + String(pressure) +
+                   "&gas=" + String(gas) +
+                   "&altitude=" + String(altitude) +
+                   "&gps_lat=" + String(gpsLat, 6) +
+                   "&gps_lon=" + String(gpsLon, 6) +
+                   "&gps_alt=" + String(gpsAlt, 2) +
+                   "&gps_fix=" + String(gpsHasFix?1:0) +
+                   "&tof_distance=" + String(tofDistance) +
+                   "&hr=" + String(heartRate) +
+                   "&hr_valid=" + String(hrValid) +
+                   "&spo2=" + String(spo2) +
+                   "&spo2_valid=" + String(spo2Valid);
 
-    int httpResponseCode = http.POST(payload);
-    Serial.print("HTTP POST Response code: ");
-    Serial.println(httpResponseCode);
-    http.end();
-  } else {
-    Serial.println("WiFi not connected, cannot send data.");
-  }
+  int httpResponseCode = http.POST(payload);
+  Serial.print("HTTP POST Response code: ");
+  Serial.println(httpResponseCode);
+  http.end();
 }
 
-// ======== Template HTML (BME + GPS + ToF) =========
+// ======== HTML + SSE =========
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html>
 <head>
-  <title>ESP32 BME688 + GPS + ToF WEB SERVER (SSE)</title>
+  <title>ESP32 HUB</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="stylesheet" href="https://use.fontawesome.com/releases/v5.7.2/css/all.css">
-  <link rel="icon" href="data:,">
   <style>
-    html {font-family: Arial; display: inline-block; text-align: center;}
-    p { font-size: 1.2rem;}
-    body {  margin: 0;}
-    .topnav { overflow: hidden; background-color: #50B8B4; color: white; font-size: 1rem; }
-    .content { padding: 20px; }
-    .card { background-color: white; box-shadow: 2px 2px 12px 1px rgba(140,140,140,.5); }
-    .cards { max-width: 900px; margin: 0 auto; display: grid; grid-gap: 2rem; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
-    .reading { font-size: 1.4rem; }
+    body { font-family: Arial; text-align: center; margin: 0; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); grid-gap: 15px; padding: 20px; }
+    .card { background-color: #fff; box-shadow: 2px 2px 12px rgba(0,0,0,0.2); padding: 15px; border-radius: 10px; }
+    .reading { font-size: 1.5rem; }
   </style>
 </head>
 <body>
-  <div class="topnav">
-    <h1>BME688 + GPS + ToF WEB SERVER (SSE)</h1>
+  <h1>ESP32 HUB Sensors</h1>
+  <div class="cards">
+    <div class="card"><p>Temperature</p><p class="reading" id="temp">%TEMPERATURE%</p></div>
+    <div class="card"><p>Humidity</p><p class="reading" id="hum">%HUMIDITY%</p></div>
+    <div class="card"><p>Pressure</p><p class="reading" id="pres">%PRESSURE%</p></div>
+    <div class="card"><p>Gas</p><p class="reading" id="gas">%GAS%</p></div>
+    <div class="card"><p>Altitude</p><p class="reading" id="alt">%ALTITUDE%</p></div>
+    <div class="card"><p>Latitude</p><p class="reading" id="gps_lat">%GPSLAT%</p></div>
+    <div class="card"><p>Longitude</p><p class="reading" id="gps_lon">%GPSLON%</p></div>
+    <div class="card"><p>GPS Altitude</p><p class="reading" id="gps_alt">%GPSALT%</p></div>
+    <div class="card"><p>ToF Distance</p><p class="reading" id="tof_distance">%TOFDISTANCE%</p></div>
+    <div class="card"><p>Heart Rate</p><p class="reading" id="hr">%HR%</p></div>
+    <div class="card"><p>SpO2</p><p class="reading" id="spo2">%SPO2%</p></div>
   </div>
-  <div class="content">
-    <div class="cards">
-      <div class="card">
-        <p><i class="fas fa-thermometer-half" style="color:#059e8a;"></i> TEMPERATURE</p>
-        <p><span class="reading"><span id="temp">%TEMPERATURE%</span> &deg;C</span></p>
-      </div>
-      <div class="card">
-        <p><i class="fas fa-tint" style="color:#00add6;"></i> HUMIDITY</p>
-        <p><span class="reading"><span id="hum">%HUMIDITY%</span> &percnt;</span></p>
-      </div>
-      <div class="card">
-        <p><i class="fas fa-angle-double-down" style="color:#e1e437;"></i> PRESSURE</p>
-        <p><span class="reading"><span id="pres">%PRESSURE%</span> hPa</span></p>
-      </div>
-      <div class="card">
-        <p><i class="fas fa-burn" style="color:#e37a31;"></i> GAS</p>
-        <p><span class="reading"><span id="gas">%GAS%</span> KOhms</span></p>
-      </div>
-      <div class="card">
-        <p><i class="fas fa-mountain" style="color:#777777;"></i> ALTITUDE</p>
-        <p><span class="reading"><span id="alt">%ALTITUDE%</span> m</span></p>
-      </div>
-      <div class="card">
-        <p><i class="fas fa-map-marker-alt"></i> LATITUDE</p>
-        <p><span class="reading"><span id="gps_lat">%GPSLAT%</span></span></p>
-      </div>
-      <div class="card">
-        <p><i class="fas fa-map-marker-alt"></i> LONGITUDE</p>
-        <p><span class="reading"><span id="gps_lon">%GPSLON%</span></span></p>
-      </div>
-      <div class="card">
-        <p><i class="fas fa-mountain"></i> GPS ALTITUDE</p>
-        <p><span class="reading"><span id="gps_alt">%GPSALT%</span> m</span></p>
-      </div>
-      <div class="card">
-        <p><i class="fas fa-ruler" style="color:#ff6600;"></i> TOF DISTANCE</p>
-        <p><span class="reading"><span id="tof_distance">%TOFDISTANCE%</span> mm</span></p>
-      </div>
-    </div>
-  </div>
+
 <script>
 if (!!window.EventSource) {
- var source = new EventSource('/events');
- 
- source.addEventListener('open', function(e) {
-  console.log("Events Connected");
- }, false);
- source.addEventListener('error', function(e) {
-  if (e.target.readyState != EventSource.OPEN) {
-    console.log("Events Disconnected");
-  }
- }, false);
- 
- source.addEventListener('temperature', function(e) {
-  document.getElementById("temp").innerHTML = e.data;
- }, false);
- 
- source.addEventListener('humidity', function(e) {
-  document.getElementById("hum").innerHTML = e.data;
- }, false);
- 
- source.addEventListener('pressure', function(e) {
-  document.getElementById("pres").innerHTML = e.data;
- }, false);
+  var source = new EventSource('/events');
 
- source.addEventListener('gas', function(e) {
-  document.getElementById("gas").innerHTML = e.data;
- }, false);
-
- source.addEventListener('altitude', function(e) {
-  document.getElementById("alt").innerHTML = e.data;
- }, false);
-
- source.addEventListener('gps_lat', function(e) {
-  document.getElementById("gps_lat").innerHTML = e.data;
- }, false);
-
- source.addEventListener('gps_lon', function(e) {
-  document.getElementById("gps_lon").innerHTML = e.data;
- }, false);
-
- source.addEventListener('gps_alt', function(e) {
-  document.getElementById("gps_alt").innerHTML = e.data;
- }, false);
-
- source.addEventListener('tof_distance', function(e) {
-  document.getElementById("tof_distance").innerHTML = e.data;
- }, false);
+  source.addEventListener('temperature', e => document.getElementById('temp').innerHTML = e.data);
+  source.addEventListener('humidity',    e => document.getElementById('hum').innerHTML = e.data);
+  source.addEventListener('pressure',    e => document.getElementById('pres').innerHTML = e.data);
+  source.addEventListener('gas',         e => document.getElementById('gas').innerHTML = e.data);
+  source.addEventListener('altitude',    e => document.getElementById('alt').innerHTML = e.data);
+  source.addEventListener('gps_lat',     e => document.getElementById('gps_lat').innerHTML = e.data);
+  source.addEventListener('gps_lon',     e => document.getElementById('gps_lon').innerHTML = e.data);
+  source.addEventListener('gps_alt',     e => document.getElementById('gps_alt').innerHTML = e.data);
+  source.addEventListener('tof_distance',e => document.getElementById('tof_distance').innerHTML = e.data);
+  source.addEventListener('hr',          e => document.getElementById('hr').innerHTML = e.data);
+  source.addEventListener('spo2',        e => document.getElementById('spo2').innerHTML = e.data);
 }
 </script>
 </body>
 </html>)rawliteral";
 
-// %VAR% replacement for first page load
+// ======== HTML Variable Replacement =========
 String processor(const String& var) {
-  if      (var == "TEMPERATURE")   return String(temperature);
-  else if (var == "HUMIDITY")      return String(humidity);
-  else if (var == "PRESSURE")      return String(pressure);
-  else if (var == "GAS")           return String(gas);
-  else if (var == "ALTITUDE")      return String(altitude);
-  else if (var == "GPSLAT")        return String(gpsLat, 6);
-  else if (var == "GPSLON")        return String(gpsLon, 6);
-  else if (var == "GPSALT")        return String(gpsAlt, 2);
-  else if (var == "TOFDISTANCE")   return String(tofDistance);
+  if      (var == "TEMPERATURE") return String(temperature);
+  else if (var == "HUMIDITY")    return String(humidity);
+  else if (var == "PRESSURE")    return String(pressure);
+  else if (var == "GAS")         return String(gas);
+  else if (var == "ALTITUDE")    return String(altitude);
+  else if (var == "GPSLAT")      return String(gpsLat, 6);
+  else if (var == "GPSLON")      return String(gpsLon, 6);
+  else if (var == "GPSALT")      return String(gpsAlt, 2);
+  else if (var == "TOFDISTANCE") return String(tofDistance);
+  else if (var == "HR")          return String(heartRate);
+  else if (var == "SPO2")        return String(spo2);
   return String();
 }
 
@@ -483,72 +355,54 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  Serial.println(F("Starting up..."));
+  Wire.begin();
+  initDisplay();
+  initBME();
+  initGPS();
+  initToF();
+  initWiFi();
 
-  Wire.begin();         // shared I2C for BME, GPS, ToF
-  initDisplay();        // OLED
-  initBME();            // BME688
-  initGPS();            // GPS
-  initToF();            // ToF
-  initWiFi();           // WiFi and IP
-
-  // Web Server main page
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
     request->send_P(200, "text/html", index_html, processor);
   });
 
-  // Server-Sent Events handler
   events.onConnect([](AsyncEventSourceClient *client){
-    if(client->lastId()){
-      Serial.printf("Client reconnected! Last message ID that it got is: %u\n", client->lastId());
-    }
-    client->send("hello!", NULL, millis(), 10000);
+    if(client->lastId()) Serial.printf("Client reconnected! Last ID: %u\n", client->lastId());
   });
-
   server.addHandler(&events);
   server.begin();
 
-  Serial.println(F("Setup complete."));
+  BLEDevice::init("");
+  doConnect = connectToServer();
 }
 
 // ======== LOOP =========
 void loop() {
-  // Keep GPS and ToF updated as often as possible
   getGPSReadings();
   getToFReading();
 
   if ((millis() - lastTime) > timerDelay) {
-    // BME readings
     if (getSensorReadings()) {
       events.send(String(temperature).c_str(), "temperature", millis());
       events.send(String(humidity).c_str(),    "humidity",    millis());
       events.send(String(pressure).c_str(),    "pressure",    millis());
       events.send(String(gas).c_str(),         "gas",         millis());
       events.send(String(altitude).c_str(),    "altitude",    millis());
+      events.send(String(heartRate).c_str(),   "hr",          millis());
+      events.send(String(spo2).c_str(),        "spo2",        millis());
     }
 
-    // GPS readings (only if fix)
     if (gpsHasFix) {
-      Serial.printf("[GPS] Fix:%d Lat:%.6f Lon:%.6f Alt:%.2f\n",
-                    gpsHasFix, gpsLat, gpsLon, gpsAlt);
       events.send(String(gpsLat, 6).c_str(), "gps_lat", millis());
       events.send(String(gpsLon, 6).c_str(), "gps_lon", millis());
       events.send(String(gpsAlt, 2).c_str(), "gps_alt", millis());
-    } else {
-      Serial.println("[GPS] No fix yet. Waiting for satellites...");
     }
 
-    // ToF (if last reading was valid)
-    if (!isnan(tofDistance)) {
-      Serial.printf("[ToF] Distance: %.2f mm\n", tofDistance);
-      events.send(String(tofDistance).c_str(), "tof_distance", millis());
-    } else {
-      Serial.println("[ToF] No valid measurement.");
-    }
+    if (!isnan(tofDistance)) events.send(String(tofDistance).c_str(), "tof_distance", millis());
 
-    // Send everything to your Python/SQLite server
     sendDataToServer();
-
     lastTime = millis();
   }
+
+  if (!connected) doConnect = connectToServer();
 }
