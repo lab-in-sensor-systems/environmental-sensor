@@ -4,12 +4,12 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 
-#include "SparkFun_LIS2DH12.h"   // Library hacked so isConnected() only checks ACK
+#include "SparkFun_LIS2DH12.h"   // Library edited so isConnected() only checks ACK
 SPARKFUN_LIS2DH12 accel;
 
 // BLE UUIDs (same hub as your PPG code)
-#define SERVICE_UUID        "d3aa6a66-a623-4c76-80a5-a66004acf0bf"
-#define CHARACTERISTIC_UUID "2df03c7d-8ac5-493e-9d88-ac467aed4ad0"
+#define SERVICE_UUID        "e2f4d9b8-9992-474d-a3b1-db7cea750f93"
+#define CHARACTERISTIC_UUID "f446fe54-ab3a-4e86-ab0c-22f42e17ea83"
 
 // BLE server name
 #define bleServerName "accel"
@@ -17,7 +17,7 @@ SPARKFUN_LIS2DH12 accel;
 BLECharacteristic *pCharacteristic;
 
 unsigned long lastNotifyTime = 0;
-const unsigned long notifyInterval = 100; // ms, adjust as needed
+const unsigned long notifyInterval = 1000; // ms, adjust as needed
 
 void setup() {
   Serial.begin(115200);
