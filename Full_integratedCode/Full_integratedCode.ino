@@ -78,14 +78,23 @@ unsigned long timerDelay = 2000;
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // ======== BLE Client Setup ========
-#define SERVER_SERVICE_UUID        "d3aa6a66-a623-4c76-80a5-a66004acf0bf"
-#define SERVER_CHARACTERISTIC_UUID "2df03c7d-8ac5-493e-9d88-ac467aed4ad0"
+// PPG server UUIDs
+#define PPG_SERVICE_UUID        "d3aa6a66-a623-4c76-80a5-a66004acf0bf"
+#define PPG_CHARACTERISTIC_UUID "2df03c7d-8ac5-493e-9d88-ac467aed4ad0"
 
-BLEClient*  pClient;
-BLERemoteCharacteristic* pRemoteCharacteristic;
-bool doConnect = false;
-bool connected = false;
-bool doScan = false;
+// ACCEL server UUIDs
+#define ACCEL_SERVICE_UUID        "e2f4d9b8-9992-474d-a3b1-db7cea750f93"
+#define ACCEL_CHARACTERISTIC_UUID "f446fe54-ab3a-4e86-ab0c-22f42e17ea83"
+
+// PPG client
+BLEClient*  ppgClient        = nullptr;
+BLERemoteCharacteristic* ppgRemoteCharacteristic = nullptr;
+bool ppgConnected = false;
+
+// ACCEL client
+BLEClient*  accelClient        = nullptr;
+BLERemoteCharacteristic* accelRemoteCharacteristic = nullptr;
+bool accelConnected = false;
 
 // HR + SpO2 readings
 uint8_t heartRate = 0;
@@ -93,49 +102,138 @@ uint8_t hrValid   = 0;
 uint8_t spo2      = 0;
 uint8_t spo2Valid = 0;
 
+// ACCEL readings (mg and °C)
+int16_t accelX = 0;
+int16_t accelY = 0;
+int16_t accelZ = 0;
+int8_t  accelTempC = 0;
+bool    accelHasData = false;
+
 // Forward declarations
 void updateDisplay();
 void sendDataToServer();
+bool connectToPPGServer();
+bool connectToAccelServer();
 
-// ======== BLE Notification Callback ========
-static void notifyCallback(
-  BLERemoteCharacteristic* pBLERemoteCharacteristic,
+// ======== BLE Notification Callbacks ========
+// PPG
+static void ppgNotifyCallback(
+  BLERemoteCharacteristic*,
   uint8_t* pData,
   size_t length,
-  bool isNotify
+  bool
 ) {
   if (length >= 4) {
     heartRate = pData[0];
     hrValid   = pData[1];
     spo2      = pData[2];
     spo2Valid = pData[3];
-    Serial.printf("HR=%d valid=%d | SpO2=%d valid=%d\n", heartRate, hrValid, spo2, spo2Valid);
+    Serial.printf("[PPG] HR=%d valid=%d | SpO2=%d valid=%d\n",
+                  heartRate, hrValid, spo2, spo2Valid);
   }
 }
 
-// ======== BLE Connect Function ========
-bool connectToServer() {
+// ACCEL (expects 7 bytes: xL,xH,yL,yH,zL,zH,temp)
+static void accelNotifyCallback(
+  BLERemoteCharacteristic*,
+  uint8_t* pData,
+  size_t length,
+  bool
+) {
+  if (length >= 7) {
+    accelX = (int16_t)(pData[0] | (pData[1] << 8));
+    accelY = (int16_t)(pData[2] | (pData[3] << 8));
+    accelZ = (int16_t)(pData[4] | (pData[5] << 8));
+    accelTempC = (int8_t)pData[6];
+    accelHasData = true;
+    Serial.printf("[ACCEL] x=%dmg y=%dmg z=%dmg T=%dC\n",
+                  accelX, accelY, accelZ, accelTempC);
+  }
+}
+
+// ======== BLE Connect Functions ========
+
+bool connectToPPGServer() {
+  Serial.println("Scanning for PPG server...");
   BLEScan* pBLEScan = BLEDevice::getScan();
   pBLEScan->setActiveScan(true);
-  BLEScanResults foundDevices = pBLEScan->start(5);
+  BLEScanResults* foundDevices = pBLEScan->start(5);
 
-  for (int i = 0; i < foundDevices.getCount(); i++) {
-    BLEAdvertisedDevice device = foundDevices.getDevice(i);
-    if (device.haveServiceUUID() && device.isAdvertisingService(BLEUUID(SERVER_SERVICE_UUID))) {
-      Serial.println("Found MAX30102 sensor node!");
-      pClient = BLEDevice::createClient();
-      pClient->connect(&device);
-      BLERemoteService* pRemoteService = pClient->getService(BLEUUID(SERVER_SERVICE_UUID));
-      if (pRemoteService == nullptr) return false;
-      pRemoteCharacteristic = pRemoteService->getCharacteristic(BLEUUID(SERVER_CHARACTERISTIC_UUID));
-      if (pRemoteCharacteristic == nullptr) return false;
-      if (pRemoteCharacteristic->canNotify()) {
-        pRemoteCharacteristic->registerForNotify(notifyCallback);
+  for (int i = 0; i < foundDevices->getCount(); i++) {
+    BLEAdvertisedDevice device = foundDevices->getDevice(i);
+    if (device.haveServiceUUID() &&
+        device.isAdvertisingService(BLEUUID(PPG_SERVICE_UUID))) {
+      Serial.println("Found PPG sensor node");
+      ppgClient = BLEDevice::createClient();
+      if (!ppgClient->connect(&device)) {
+        Serial.println("PPG connect failed");
+        return false;
       }
-      connected = true;
+      BLERemoteService* pRemoteService =
+        ppgClient->getService(BLEUUID(PPG_SERVICE_UUID));
+      if (pRemoteService == nullptr) {
+        Serial.println("PPG service not found");
+        ppgClient->disconnect();
+        return false;
+      }
+      ppgRemoteCharacteristic =
+        pRemoteService->getCharacteristic(BLEUUID(PPG_CHARACTERISTIC_UUID));
+      if (ppgRemoteCharacteristic == nullptr) {
+        Serial.println("PPG characteristic not found");
+        ppgClient->disconnect();
+        return false;
+      }
+      if (ppgRemoteCharacteristic->canNotify()) {
+        ppgRemoteCharacteristic->registerForNotify(ppgNotifyCallback);
+      }
+      ppgConnected = true;
+      Serial.println("PPG connected and notifications enabled");
       return true;
     }
   }
+  Serial.println("PPG server not found");
+  return false;
+}
+
+bool connectToAccelServer() {
+  Serial.println("Scanning for ACCEL server...");
+  BLEScan* pBLEScan = BLEDevice::getScan();
+  pBLEScan->setActiveScan(true);
+  BLEScanResults* foundDevices = pBLEScan->start(5);
+
+  for (int i = 0; i < foundDevices->getCount(); i++) {
+    BLEAdvertisedDevice device = foundDevices->getDevice(i);
+    if (device.haveServiceUUID() &&
+        device.isAdvertisingService(BLEUUID(ACCEL_SERVICE_UUID))) {
+      Serial.println("Found ACCEL sensor node");
+      accelClient = BLEDevice::createClient();
+      if (!accelClient->connect(&device)) {
+        Serial.println("ACCEL connect failed");
+        return false;
+      }
+      BLERemoteService* pRemoteService =
+        accelClient->getService(BLEUUID(ACCEL_SERVICE_UUID));
+      if (pRemoteService == nullptr) {
+        Serial.println("ACCEL service not found");
+        accelClient->disconnect();
+        return false;
+      }
+      accelRemoteCharacteristic =
+        pRemoteService->getCharacteristic(BLEUUID(ACCEL_CHARACTERISTIC_UUID));
+      if (accelRemoteCharacteristic == nullptr) {
+        Serial.println("ACCEL characteristic not found");
+        accelClient->disconnect();
+        return false;
+      }
+      if (accelRemoteCharacteristic->canNotify()) {
+        accelRemoteCharacteristic->registerForNotify(accelNotifyCallback);
+      }
+      accelConnected = true;
+      Serial.println("ACCEL connected and notifications enabled");
+      return true;
+    }
+  }
+  Serial.println("ACCEL server not found");
   return false;
 }
 
@@ -199,10 +297,17 @@ void updateDisplay() {
   display.setCursor(0, 0);
   display.println(F("BME688 Monitor"));
 
-  display.printf("T: %.1f C\nH: %.1f %%\nP: %.1f hPa\nGas: %.2f kOhm\nAlt: %.1f m\n", 
+  display.printf("T: %.1f C\nH: %.1f %%\nP: %.1f hPa\nGas: %.2f kOhm\nAlt: %.1f m\n",
                  temperature, humidity, pressure, gas, altitude);
 
-  display.printf("HR: %d %s\nSpO2: %d %s\n", heartRate, hrValid?"OK":"NA", spo2, spo2Valid?"OK":"NA");
+  display.printf("HR: %d %s\nSpO2: %d %s\n",
+                 heartRate, hrValid?"OK":"NA",
+                 spo2,     spo2Valid?"OK":"NA");
+
+  if (accelHasData) {
+    display.printf("Ax:%d Ay:%d Az:%d\nT:%dC\n",
+                   accelX, accelY, accelZ, accelTempC);
+  }
 
   if (!isnan(tofDistance)) display.printf("ToF: %.0f mm\n", tofDistance);
 
@@ -226,6 +331,7 @@ bool getSensorReadings() {
 
 void getGPSReadings() {
   char c = gps.read();
+  (void)c;
   if (gps.newNMEAreceived()) if (!gps.parse(gps.lastNMEA())) return;
   gpsHasFix = gps.fix;
   if (gpsHasFix) {
@@ -277,7 +383,11 @@ void sendDataToServer() {
                    "&hr=" + String(heartRate) +
                    "&hr_valid=" + String(hrValid) +
                    "&spo2=" + String(spo2) +
-                   "&spo2_valid=" + String(spo2Valid);
+                   "&spo2_valid=" + String(spo2Valid) +
+                   "&accel_x=" + String(accelX) +
+                   "&accel_y=" + String(accelY) +
+                   "&accel_z=" + String(accelZ) +
+                   "&accel_temp=" + String(accelTempC);
 
   int httpResponseCode = http.POST(payload);
   Serial.print("HTTP POST Response code: ");
@@ -312,6 +422,10 @@ const char index_html[] PROGMEM = R"rawliteral(
     <div class="card"><p>ToF Distance</p><p class="reading" id="tof_distance">%TOFDISTANCE%</p></div>
     <div class="card"><p>Heart Rate</p><p class="reading" id="hr">%HR%</p></div>
     <div class="card"><p>SpO2</p><p class="reading" id="spo2">%SPO2%</p></div>
+    <div class="card"><p>Accel X</p><p class="reading" id="accel_x">%ACCELX%</p></div>
+    <div class="card"><p>Accel Y</p><p class="reading" id="accel_y">%ACCELY%</p></div>
+    <div class="card"><p>Accel Z</p><p class="reading" id="accel_z">%ACCELZ%</p></div>
+    <div class="card"><p>Accel Temp</p><p class="reading" id="accel_temp">%ACCELTEMP%</p></div>
   </div>
 
 <script>
@@ -329,6 +443,10 @@ if (!!window.EventSource) {
   source.addEventListener('tof_distance',e => document.getElementById('tof_distance').innerHTML = e.data);
   source.addEventListener('hr',          e => document.getElementById('hr').innerHTML = e.data);
   source.addEventListener('spo2',        e => document.getElementById('spo2').innerHTML = e.data);
+  source.addEventListener('accel_x',     e => document.getElementById('accel_x').innerHTML = e.data);
+  source.addEventListener('accel_y',     e => document.getElementById('accel_y').innerHTML = e.data);
+  source.addEventListener('accel_z',     e => document.getElementById('accel_z').innerHTML = e.data);
+  source.addEventListener('accel_temp',  e => document.getElementById('accel_temp').innerHTML = e.data);
 }
 </script>
 </body>
@@ -347,6 +465,10 @@ String processor(const String& var) {
   else if (var == "TOFDISTANCE") return String(tofDistance);
   else if (var == "HR")          return String(heartRate);
   else if (var == "SPO2")        return String(spo2);
+  else if (var == "ACCELX")      return String(accelX);
+  else if (var == "ACCELY")      return String(accelY);
+  else if (var == "ACCELZ")      return String(accelZ);
+  else if (var == "ACCELTEMP")   return String(accelTempC);
   return String();
 }
 
@@ -372,8 +494,9 @@ void setup() {
   server.addHandler(&events);
   server.begin();
 
-  BLEDevice::init("");
-  doConnect = connectToServer();
+  BLEDevice::init("hub");
+  connectToPPGServer();
+  connectToAccelServer();
 }
 
 // ======== LOOP =========
@@ -390,6 +513,12 @@ void loop() {
       events.send(String(altitude).c_str(),    "altitude",    millis());
       events.send(String(heartRate).c_str(),   "hr",          millis());
       events.send(String(spo2).c_str(),        "spo2",        millis());
+      if (accelHasData) {
+        events.send(String(accelX).c_str(),     "accel_x",    millis());
+        events.send(String(accelY).c_str(),     "accel_y",    millis());
+        events.send(String(accelZ).c_str(),     "accel_z",    millis());
+        events.send(String(accelTempC).c_str(), "accel_temp", millis());
+      }
     }
 
     if (gpsHasFix) {
@@ -398,11 +527,14 @@ void loop() {
       events.send(String(gpsAlt, 2).c_str(), "gps_alt", millis());
     }
 
-    if (!isnan(tofDistance)) events.send(String(tofDistance).c_str(), "tof_distance", millis());
+    if (!isnan(tofDistance))
+      events.send(String(tofDistance).c_str(), "tof_distance", millis());
 
     sendDataToServer();
     lastTime = millis();
   }
 
-  if (!connected) doConnect = connectToServer();
+  // Simple reconnect logic
+  if (!ppgConnected)   connectToPPGServer();
+  if (!accelConnected) connectToAccelServer();
 }
