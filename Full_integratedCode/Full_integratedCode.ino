@@ -286,6 +286,8 @@ void initWiFi() {
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) delay(1000);
   wifiReady = true;
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
 }
 
 // ======== Update OLED Display =========
