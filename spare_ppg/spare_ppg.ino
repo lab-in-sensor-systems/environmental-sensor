@@ -13,11 +13,11 @@
 #define bleServerName       "ppg"
 
 // =========================
-// PulseSensor Pins
+// PulseSensor Pins (ESP32-S3 Feather)
 // =========================
-const int PULSE_INPUT = A0;
-const int PULSE_BLINK = 13;
-const int PULSE_FADE  = 5;
+const int PULSE_INPUT = A0;   // GPIO 17
+const int PULSE_BLINK = 13;   // Built-in LED (works)
+const int PULSE_FADE  = 5;    // PWM-capable pin (OK)
 const int THRESHOLD   = 685;
 
 // PulseSensor object
@@ -38,7 +38,7 @@ class ServerCallbacks: public BLEServerCallbacks {
   }
   void onDisconnect(BLEServer* pServer) {
     deviceConnected = false;
-    pServer->startAdvertising();  // keep advertising
+    pServer->startAdvertising();
   }
 };
 
@@ -48,6 +48,10 @@ class ServerCallbacks: public BLEServerCallbacks {
 void setup() {
   Serial.begin(115200);
   delay(1000);
+
+  // Set LED pins
+  pinMode(PULSE_BLINK, OUTPUT);
+  pinMode(PULSE_FADE, OUTPUT);
 
   // -------------------------
   // PulseSensor Setup
@@ -87,10 +91,8 @@ void setup() {
                       BLECharacteristic::PROPERTY_NOTIFY
                     );
 
-  // Start service
   service->start();
 
-  // Start advertising
   BLEAdvertising *advertising = BLEDevice::getAdvertising();
   advertising->addServiceUUID(SERVICE_UUID);
   advertising->setScanResponse(true);
@@ -104,14 +106,12 @@ void setup() {
 // =========================
 void loop() {
 
-  // Check for beat
   if (pulseSensor.sawStartOfBeat()) {
     int bpm = pulseSensor.getBeatsPerMinute();
 
     Serial.print("BPM: ");
     Serial.println(bpm);
 
-    // Send notification over BLE
     if (deviceConnected) {
       String bpmString = String(bpm);
       pCharacteristic->setValue(bpmString.c_str());
