@@ -114,10 +114,17 @@ BLERemoteCharacteristic* accelRemoteCharacteristic = nullptr;
 bool accelConnected = false;
 
 // HR + SpO2 readings (from PPG node)
-uint8_t heartRate = 0;
-uint8_t hrValid   = 0;
-uint8_t spo2      = 0;
-uint8_t spo2Valid = 0;
+//uint8_t heartRate = 0;
+//uint8_t hrValid   = 0;
+//uint8_t spo2      = 0;
+//uint8_t spo2Valid = 0;
+
+// SPARE_PPG NODE:
+int heartRate = 0;          // BPM from PulseSensor server
+bool hrValid = false;       // simple validity flag
+// (No SpO2 from this server, so keep spo2/spo2Valid as 0)
+int  spo2      = 0;
+bool spo2Valid = false;
 
 // ACCEL readings (mg and °C) from accel node
 int16_t accelX = 0;
@@ -153,6 +160,41 @@ static void ppgNotifyCallback(
     Serial.printf("[PPG] Notification length too short: %u bytes\n", (unsigned)length);
   }
 }
+
+// Spare PPG: server sends BPM as ASCII string (e.g. "72")
+static void spareppgNotifyCallback(
+  BLERemoteCharacteristic* pChar,
+  uint8_t* pData,
+  size_t length,
+  bool
+) {
+  if (length == 0) {
+    Serial.println("[PPG] Empty notification");
+    return;
+  }
+
+  // Interpret payload as ASCII string and convert to int BPM
+  String s;
+  for (size_t i = 0; i < length; i++) {
+    s += (char)pData[i];
+  }
+
+  int bpm = s.toInt();  // returns 0 if parse fails
+
+  if (bpm > 0) {
+    heartRate = bpm;
+    hrValid   = true;
+    Serial.printf("[PPG] BPM=%d (from server string \"%s\")\n", heartRate, s.c_str());
+  } else {
+    hrValid = false;
+    Serial.printf("[PPG] Invalid BPM string \"%s\"\n", s.c_str());
+  }
+
+  // No SpO2 info from this server
+  spo2      = 0;
+  spo2Valid = false;
+}
+
 
 
 // ACCEL (expects 7 bytes: xL,xH,yL,yH,zL,zH,temp)
@@ -216,7 +258,8 @@ bool connectToPPGServer() {
         return false;
       }
       if (ppgRemoteCharacteristic->canNotify()) {
-        ppgRemoteCharacteristic->registerForNotify(ppgNotifyCallback);
+        //ppgRemoteCharacteristic->registerForNotify(ppgNotifyCallback); // COMMENT-OUT OR UNCOMMENT DEPENDING ON WHETHER YOU ARE USING OUR PPG NODE OR SPARE_PPG NODE
+        ppgRemoteCharacteristic->registerForNotify(spareppgNotifyCallback);
       }
       ppgConnected = true;
       Serial.println("[BLE] PPG connected and notifications enabled");
