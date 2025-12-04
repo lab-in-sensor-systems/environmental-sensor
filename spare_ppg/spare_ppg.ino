@@ -16,8 +16,8 @@
 // PulseSensor Pins (ESP32-S3 Feather)
 // =========================
 const int PULSE_INPUT = A0;   // GPIO 17
-const int PULSE_BLINK = 13;   // Built-in LED (works)
-const int PULSE_FADE  = 5;    // PWM-capable pin (OK)
+const int PULSE_BLINK = 13;   // Built-in LED
+const int PULSE_FADE  = 5;    // PWM-capable pin
 const int THRESHOLD   = 685;
 
 // PulseSensor object
@@ -33,11 +33,13 @@ bool deviceConnected = false;
 // BLE Callbacks
 // =========================
 class ServerCallbacks: public BLEServerCallbacks {
-  void onConnect(BLEServer* pServer) {
+  void onConnect(BLEServer* pServer) override {
     deviceConnected = true;
+    Serial.println("[BLE] Central connected");
   }
-  void onDisconnect(BLEServer* pServer) {
+  void onDisconnect(BLEServer* pServer) override {
     deviceConnected = false;
+    Serial.println("[BLE] Central disconnected, restarting advertising");
     pServer->startAdvertising();
   }
 };
@@ -48,6 +50,8 @@ class ServerCallbacks: public BLEServerCallbacks {
 void setup() {
   Serial.begin(115200);
   delay(1000);
+  Serial.println();
+  Serial.println("===== SPARE PPG BOOT =====");
 
   // Set LED pins
   pinMode(PULSE_BLINK, OUTPUT);
@@ -56,6 +60,7 @@ void setup() {
   // -------------------------
   // PulseSensor Setup
   // -------------------------
+  Serial.println("[INIT] PulseSensor...");
   analogReadResolution(10);
 
   pulseSensor.analogInput(PULSE_INPUT);
@@ -65,7 +70,7 @@ void setup() {
   pulseSensor.setThreshold(THRESHOLD);
 
   if (!pulseSensor.begin()) {
-    Serial.println("PulseSensor initialization FAILED.");
+    Serial.println("[INIT] PulseSensor initialization FAILED. Check wiring.");
     while (1) {
       digitalWrite(PULSE_BLINK, LOW);
       delay(50);
@@ -73,11 +78,12 @@ void setup() {
       delay(50);
     }
   }
-  Serial.println("PulseSensor initialized!");
+  Serial.println("[INIT] PulseSensor initialized OK");
 
   // -------------------------
   // BLE Setup
   // -------------------------
+  Serial.println("[INIT] BLE server setup...");
   BLEDevice::init(bleServerName);
 
   pServer = BLEDevice::createServer();
@@ -91,6 +97,9 @@ void setup() {
                       BLECharacteristic::PROPERTY_NOTIFY
                     );
 
+  // Optional: set an initial value so you can read it from a scanner
+  pCharacteristic->setValue("0");
+
   service->start();
 
   BLEAdvertising *advertising = BLEDevice::getAdvertising();
@@ -98,24 +107,30 @@ void setup() {
   advertising->setScanResponse(true);
   BLEDevice::startAdvertising();
 
-  Serial.println("BLE Advertising started…");
+  Serial.println("[BLE] Advertising started, waiting for central...");
 }
 
 // =========================
 // Loop
 // =========================
 void loop() {
-
+  // Check for heartbeat
   if (pulseSensor.sawStartOfBeat()) {
     int bpm = pulseSensor.getBeatsPerMinute();
 
-    Serial.print("BPM: ");
+    Serial.println("♥  Heartbeat detected!");
+    Serial.print("[PPG] Local BPM: ");
     Serial.println(bpm);
 
     if (deviceConnected) {
+      Serial.print("[PPG] Sending BPM over BLE: ");
+      Serial.println(bpm);
+
       String bpmString = String(bpm);
       pCharacteristic->setValue(bpmString.c_str());
       pCharacteristic->notify();
+    } else {
+      Serial.println("[PPG] No BLE central connected, not sending BPM");
     }
   }
 
