@@ -5,20 +5,25 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 
+
 // ======== OLED Includes (SSD1306) ========
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+
 
 // ======== GPS Includes ========
 #include <Adafruit_GPS.h>
 #include <Adafruit_PMTK.h>
 #include <NMEA_data.h>
 
+
 // ======== ToF Includes ========
 #include <vl53l4cx_class.h>
 
+
 // ======== HTTP Client ========
 #include <HTTPClient.h>
+
 
 // ======== BLE Client Includes ========
 #include <BLEDevice.h>
@@ -27,16 +32,22 @@
 #include <BLEClient.h>
 #include <BLERemoteCharacteristic.h>
 
+
 // ======== WiFi Configuration ========
+// NOTE: change to your actual network credentials.
 const char* ssid     = "Adriana";
 const char* password = "1234567890";
 
+
 // ======== Python Server Endpoint ========
+// ESP32 will POST form-encoded readings here.
 const char* serverURL = "http://172.20.10.4:5050/upload";
+
 
 // ======== Web Server and SSE ========
 AsyncWebServer server(80);
 AsyncEventSource events("/events");
+
 
 // ======== BME688 Setup ========
 #define SEALEVELPRESSURE_HPA (1007.03)
@@ -52,10 +63,13 @@ bool bmeReady  = false;
 bool oledReady = false;
 bool wifiReady = false;
 
+
 // ======== GPS Setup ========
-Adafruit_GPS gps(&Wire); // PA1010D I2C (0x10)
+// PA1010D GPS on I2C address 0x10 (via Adafruit_GPS I2C mode)
+Adafruit_GPS gps(&Wire);
 float gpsLat = 0.0, gpsLon = 0.0, gpsAlt = 0.0;
 bool gpsHasFix = false;
+
 
 // ======== ToF Setup (VL53L4CX) ========
 VL53L4CX sensor_vl53l4cx_sat;
@@ -65,9 +79,11 @@ TwoWire *TOF_I2C = &Wire;
 float tofDistance = NAN; // mm
 uint8_t tof_status = VL53L4CX_RANGESTATUS_NONE;
 
-// Timing
+
+// Timing (SSE + HTTP POST interval)
 unsigned long lastTime   = 0;
-unsigned long timerDelay = 2000;
+unsigned long timerDelay = 2000; // ms
+
 
 // ======== OLED Setup (SSD1306) ========
 #define SCREEN_WIDTH  128
@@ -77,37 +93,39 @@ unsigned long timerDelay = 2000;
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
+
 // ======== BLE Client Setup ========
-// PPG server UUIDs
+// PPG server UUIDs (HR + SpO2 peripheral)
 #define PPG_SERVICE_UUID        "d3aa6a66-a623-4c76-80a5-a66004acf0bf"
 #define PPG_CHARACTERISTIC_UUID "2df03c7d-8ac5-493e-9d88-ac467aed4ad0"
 
-// ACCEL server UUIDs
+// ACCEL server UUIDs (LIS2DE12 peripheral)
 #define ACCEL_SERVICE_UUID        "e2f4d9b8-9992-474d-a3b1-db7cea750f93"
 #define ACCEL_CHARACTERISTIC_UUID "f446fe54-ab3a-4e86-ab0c-22f42e17ea83"
 
-// PPG client
+// PPG client state
 BLEClient*  ppgClient        = nullptr;
 BLERemoteCharacteristic* ppgRemoteCharacteristic = nullptr;
 bool ppgConnected = false;
 
-// ACCEL client
+// ACCEL client state
 BLEClient*  accelClient        = nullptr;
 BLERemoteCharacteristic* accelRemoteCharacteristic = nullptr;
 bool accelConnected = false;
 
-// HR + SpO2 readings
+// HR + SpO2 readings (from PPG node)
 uint8_t heartRate = 0;
 uint8_t hrValid   = 0;
 uint8_t spo2      = 0;
 uint8_t spo2Valid = 0;
 
-// ACCEL readings (mg and °C)
+// ACCEL readings (mg and °C) from accel node
 int16_t accelX = 0;
 int16_t accelY = 0;
 int16_t accelZ = 0;
 int8_t  accelTempC = 0;
 bool    accelHasData = false;
+
 
 // Forward declarations
 void updateDisplay();
@@ -115,8 +133,9 @@ void sendDataToServer();
 bool connectToPPGServer();
 bool connectToAccelServer();
 
+
 // ======== BLE Notification Callbacks ========
-// PPG
+// Called whenever the PPG node notifies new HR/SpO2 bytes.
 static void ppgNotifyCallback(
   BLERemoteCharacteristic*,
   uint8_t* pData,
@@ -130,8 +149,11 @@ static void ppgNotifyCallback(
     spo2Valid = pData[3];
     Serial.printf("[PPG] HR=%d valid=%d | SpO2=%d valid=%d\n",
                   heartRate, hrValid, spo2, spo2Valid);
+  } else {
+    Serial.printf("[PPG] Notification length too short: %u bytes\n", (unsigned)length);
   }
 }
+
 
 // ACCEL (expects 7 bytes: xL,xH,yL,yH,zL,zH,temp)
 static void accelNotifyCallback(
@@ -148,13 +170,23 @@ static void accelNotifyCallback(
     accelHasData = true;
     Serial.printf("[ACCEL] x=%dmg y=%dmg z=%dmg T=%dC\n",
                   accelX, accelY, accelZ, accelTempC);
+  } else {
+    Serial.printf("[ACCEL] Notification length too short: %u bytes\n", (unsigned)length);
   }
 }
 
-// ======== BLE Connect Functions ========
 
+// ======== BLE Connect Functions ========
+// One-off scan/connect for PPG server. Only prints high-level status.
 bool connectToPPGServer() {
-  Serial.println("Scanning for PPG server...");
+  static unsigned long lastAttemptMs = 0;
+  if (millis() - lastAttemptMs < 5000 && !ppgConnected) {
+    // Avoid spamming attempts/logs tighter than 5 s.
+    return false;
+  }
+  lastAttemptMs = millis();
+
+  Serial.println("[BLE] Scanning for PPG server...");
   BLEScan* pBLEScan = BLEDevice::getScan();
   pBLEScan->setActiveScan(true);
   BLEScanResults* foundDevices = pBLEScan->start(5);
@@ -163,23 +195,23 @@ bool connectToPPGServer() {
     BLEAdvertisedDevice device = foundDevices->getDevice(i);
     if (device.haveServiceUUID() &&
         device.isAdvertisingService(BLEUUID(PPG_SERVICE_UUID))) {
-      Serial.println("Found PPG sensor node");
+      Serial.println("[BLE] Found PPG sensor node");
       ppgClient = BLEDevice::createClient();
       if (!ppgClient->connect(&device)) {
-        Serial.println("PPG connect failed");
+        Serial.println("[BLE] PPG connect failed");
         return false;
       }
       BLERemoteService* pRemoteService =
         ppgClient->getService(BLEUUID(PPG_SERVICE_UUID));
       if (pRemoteService == nullptr) {
-        Serial.println("PPG service not found");
+        Serial.println("[BLE] PPG service not found, disconnecting");
         ppgClient->disconnect();
         return false;
       }
       ppgRemoteCharacteristic =
         pRemoteService->getCharacteristic(BLEUUID(PPG_CHARACTERISTIC_UUID));
       if (ppgRemoteCharacteristic == nullptr) {
-        Serial.println("PPG characteristic not found");
+        Serial.println("[BLE] PPG characteristic not found, disconnecting");
         ppgClient->disconnect();
         return false;
       }
@@ -187,16 +219,25 @@ bool connectToPPGServer() {
         ppgRemoteCharacteristic->registerForNotify(ppgNotifyCallback);
       }
       ppgConnected = true;
-      Serial.println("PPG connected and notifications enabled");
+      Serial.println("[BLE] PPG connected and notifications enabled");
       return true;
     }
   }
-  Serial.println("PPG server not found");
+  Serial.println("[BLE] PPG server not found in scan window");
   return false;
 }
 
+
+// One-off scan/connect for ACCEL server. Logs only top-level steps.
 bool connectToAccelServer() {
-  Serial.println("Scanning for ACCEL server...");
+  static unsigned long lastAttemptMs = 0;
+  if (millis() - lastAttemptMs < 5000 && !accelConnected) {
+    // Avoid spamming attempts/logs tighter than 5 s.
+    return false;
+  }
+  lastAttemptMs = millis();
+
+  Serial.println("[BLE] Scanning for ACCEL server...");
   BLEScan* pBLEScan = BLEDevice::getScan();
   pBLEScan->setActiveScan(true);
   BLEScanResults* foundDevices = pBLEScan->start(5);
@@ -205,23 +246,23 @@ bool connectToAccelServer() {
     BLEAdvertisedDevice device = foundDevices->getDevice(i);
     if (device.haveServiceUUID() &&
         device.isAdvertisingService(BLEUUID(ACCEL_SERVICE_UUID))) {
-      Serial.println("Found ACCEL sensor node");
+      Serial.println("[BLE] Found ACCEL sensor node");
       accelClient = BLEDevice::createClient();
       if (!accelClient->connect(&device)) {
-        Serial.println("ACCEL connect failed");
+        Serial.println("[BLE] ACCEL connect failed");
         return false;
       }
       BLERemoteService* pRemoteService =
         accelClient->getService(BLEUUID(ACCEL_SERVICE_UUID));
       if (pRemoteService == nullptr) {
-        Serial.println("ACCEL service not found");
+        Serial.println("[BLE] ACCEL service not found, disconnecting");
         accelClient->disconnect();
         return false;
       }
       accelRemoteCharacteristic =
         pRemoteService->getCharacteristic(BLEUUID(ACCEL_CHARACTERISTIC_UUID));
       if (accelRemoteCharacteristic == nullptr) {
-        Serial.println("ACCEL characteristic not found");
+        Serial.println("[BLE] ACCEL characteristic not found, disconnecting");
         accelClient->disconnect();
         return false;
       }
@@ -229,17 +270,20 @@ bool connectToAccelServer() {
         accelRemoteCharacteristic->registerForNotify(accelNotifyCallback);
       }
       accelConnected = true;
-      Serial.println("ACCEL connected and notifications enabled");
+      Serial.println("[BLE] ACCEL connected and notifications enabled");
       return true;
     }
   }
-  Serial.println("ACCEL server not found");
+  Serial.println("[BLE] ACCEL server not found in scan window");
   return false;
 }
 
+
 // ======== Display, BME, GPS, ToF, WiFi Initialization =========
 void initDisplay() {
+  Serial.print("[INIT] OLED... ");
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+    Serial.println("FAILED");
     oledReady = false;
     return;
   }
@@ -251,48 +295,85 @@ void initDisplay() {
   display.println(F("BME688 Monitor"));
   display.println(F("OLED OK"));
   display.display();
+  Serial.println("OK");
 }
 
+
 void initBME() {
-  if (!bme.begin()) { bmeReady = false; return; }
+  Serial.print("[INIT] BME688... ");
+  if (!bme.begin()) {
+    Serial.println("FAILED (not found on I2C)");
+    bmeReady = false;
+    return;
+  }
   bme.setTemperatureOversampling(BME680_OS_8X);
   bme.setHumidityOversampling(BME680_OS_2X);
   bme.setPressureOversampling(BME680_OS_4X);
   bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
   bme.setGasHeater(320, 150);
   bmeReady = true;
+  Serial.println("OK");
 }
 
+
 void initGPS() {
-  if (!gps.begin(0x10)) return;
+  Serial.print("[INIT] GPS (PA1010D)... ");
+  if (!gps.begin(0x10)) {
+    Serial.println("FAILED (no ACK at 0x10)");
+    return;
+  }
   gps.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
   gps.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
   gps.sendCommand(PGCMD_ANTENNA);
   delay(1000);
   gps.println(PMTK_Q_RELEASE);
+  Serial.println("OK (waiting for fix)");
 }
 
+
 void initToF() {
+  Serial.print("[INIT] VL53L4CX ToF... ");
   TOF_I2C->begin();
   sensor_vl53l4cx_sat.setI2cDevice(TOF_I2C);
   sensor_vl53l4cx_sat.setXShutPin(XSHUT_PIN);
   VL53L4CX_Error error = sensor_vl53l4cx_sat.InitSensor(VL53L4CX_DEFAULT_DEVICE_ADDRESS);
-  if (error) return;
+  if (error) {
+    Serial.printf("FAILED (err=%d)\n", error);
+    return;
+  }
   sensor_vl53l4cx_sat.VL53L4CX_StartMeasurement();
+  Serial.println("OK");
 }
 
+
 void initWiFi() {
+  Serial.print("[INIT] WiFi connect to ");
+  Serial.print(ssid);
+  Serial.println(" ...");
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) delay(1000);
-  wifiReady = true;
-  Serial.print("IP Address: ");
-  Serial.println(WiFi.localIP());
+
+  unsigned long startAttempt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 15000) {
+    Serial.print(".");
+    delay(500);
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiReady = true;
+    Serial.println();
+    Serial.print("[INIT] WiFi connected, IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\n[INIT] WiFi FAILED (timeout)");
+    wifiReady = false;
+  }
 }
+
 
 // ======== Update OLED Display =========
 void updateDisplay() {
   if (!oledReady) return;
+
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
@@ -316,10 +397,14 @@ void updateDisplay() {
   display.display();
 }
 
+
 // ======== Read Sensors =========
 bool getSensorReadings() {
   if (!bmeReady) return false;
-  if (!bme.performReading()) return false;
+  if (!bme.performReading()) {
+    Serial.println("[BME] performReading() failed");
+    return false;
+  }
 
   temperature = bme.temperature;
   pressure    = bme.pressure / 100.0;
@@ -331,10 +416,14 @@ bool getSensorReadings() {
   return true;
 }
 
+
 void getGPSReadings() {
+  // Non-blocking GPS read; parses new sentences when available.
   char c = gps.read();
   (void)c;
-  if (gps.newNMEAreceived()) if (!gps.parse(gps.lastNMEA())) return;
+  if (gps.newNMEAreceived()) {
+    if (!gps.parse(gps.lastNMEA())) return;
+  }
   gpsHasFix = gps.fix;
   if (gpsHasFix) {
     gpsLat = gps.latitude;
@@ -342,6 +431,7 @@ void getGPSReadings() {
     gpsAlt = gps.altitude;
   }
 }
+
 
 bool getToFReading() {
   uint8_t NewDataReady = 0;
@@ -358,15 +448,21 @@ bool getToFReading() {
       (pData->RangeData[0].RangeStatus == VL53L4CX_RANGESTATUS_RANGE_VALID ||
        pData->RangeData[0].RangeStatus == VL53L4CX_RANGESTATUS_RANGE_VALID_MERGED_PULSE)) {
     tofDistance = pData->RangeData[0].RangeMilliMeter;
-  } else tofDistance = NAN;
+  } else {
+    tofDistance = NAN;
+  }
 
   sensor_vl53l4cx_sat.VL53L4CX_ClearInterruptAndStartMeasurement();
   return true;
 }
 
+
 // ======== HTTP POST =========
 void sendDataToServer() {
-  if (!wifiReady || WiFi.status() != WL_CONNECTED) return;
+  if (!wifiReady || WiFi.status() != WL_CONNECTED) {
+    // Silent fail to avoid spam; WiFi status is already logged in init/reconnect.
+    return;
+  }
 
   HTTPClient http;
   http.begin(serverURL);
@@ -392,10 +488,11 @@ void sendDataToServer() {
                    "&accel_temp=" + String(accelTempC);
 
   int httpResponseCode = http.POST(payload);
-  Serial.print("HTTP POST Response code: ");
+  Serial.print("[HTTP] POST response: ");
   Serial.println(httpResponseCode);
   http.end();
 }
+
 
 // ======== HTML + SSE =========
 const char index_html[] PROGMEM = R"rawliteral(
@@ -454,6 +551,7 @@ if (!!window.EventSource) {
 </body>
 </html>)rawliteral";
 
+
 // ======== HTML Variable Replacement =========
 String processor(const String& var) {
   if      (var == "TEMPERATURE") return String(temperature);
@@ -474,32 +572,45 @@ String processor(const String& var) {
   return String();
 }
 
+
 // ======== SETUP =========
 void setup() {
   Serial.begin(115200);
   delay(1000);
+  Serial.println();
+  Serial.println("===== ESP32 HUB BOOT =====");
 
   Wire.begin();
+
   initDisplay();
   initBME();
   initGPS();
   initToF();
   initWiFi();
 
+  // HTTP + SSE endpoints
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
     request->send_P(200, "text/html", index_html, processor);
   });
 
   events.onConnect([](AsyncEventSourceClient *client){
-    if(client->lastId()) Serial.printf("Client reconnected! Last ID: %u\n", client->lastId());
+    if (client->lastId()) {
+      Serial.printf("[SSE] Client reconnected (Last ID: %u)\n", client->lastId());
+    } else {
+      Serial.println("[SSE] New client connected");
+    }
   });
   server.addHandler(&events);
   server.begin();
+  Serial.println("[INIT] HTTP server + SSE started");
 
+  // BLE central init
   BLEDevice::init("hub");
+  Serial.println("[BLE] Init done, trying initial connections...");
   connectToPPGServer();
   connectToAccelServer();
 }
+
 
 // ======== LOOP =========
 void loop() {
@@ -508,6 +619,7 @@ void loop() {
 
   if ((millis() - lastTime) > timerDelay) {
     if (getSensorReadings()) {
+      // BME + PPG + ACCEL SSE updates
       events.send(String(temperature).c_str(), "temperature", millis());
       events.send(String(humidity).c_str(),    "humidity",    millis());
       events.send(String(pressure).c_str(),    "pressure",    millis());
@@ -536,7 +648,7 @@ void loop() {
     lastTime = millis();
   }
 
-  // Simple reconnect logic
+  // Simple reconnect logic with throttled logs (inside helpers)
   if (!ppgConnected)   connectToPPGServer();
   if (!accelConnected) connectToAccelServer();
 }
