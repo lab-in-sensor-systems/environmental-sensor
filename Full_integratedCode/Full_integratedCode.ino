@@ -168,18 +168,19 @@ static void spareppgNotifyCallback(
   size_t length,
   bool
 ) {
+  Serial.printf("HELLOHELLOHELLO[PPG] notify len=%u: ", (unsigned)length);
+  for (size_t i = 0; i < length; i++) Serial.printf("%02X ", pData[i]);
+  Serial.println();
+
   if (length == 0) {
     Serial.println("[PPG] Empty notification");
     return;
   }
 
-  // Interpret payload as ASCII string and convert to int BPM
   String s;
-  for (size_t i = 0; i < length; i++) {
-    s += (char)pData[i];
-  }
+  for (size_t i = 0; i < length; i++) s += (char)pData[i];
 
-  int bpm = s.toInt();  // returns 0 if parse fails
+  int bpm = s.toInt();
 
   if (bpm > 0) {
     heartRate = bpm;
@@ -190,10 +191,10 @@ static void spareppgNotifyCallback(
     Serial.printf("[PPG] Invalid BPM string \"%s\"\n", s.c_str());
   }
 
-  // No SpO2 info from this server
   spo2      = 0;
   spo2Valid = false;
 }
+
 
 
 
