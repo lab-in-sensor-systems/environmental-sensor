@@ -143,23 +143,23 @@ bool connectToAccelServer();
 
 // ======== BLE Notification Callbacks ========
 // Called whenever the PPG node notifies new HR/SpO2 bytes.
-static void ppgNotifyCallback(
-  BLERemoteCharacteristic*,
-  uint8_t* pData,
-  size_t length,
-  bool
-) {
-  if (length >= 4) {
-    heartRate = pData[0];
-    hrValid   = pData[1];
-    spo2      = pData[2];
-    spo2Valid = pData[3];
-    Serial.printf("[PPG] HR=%d valid=%d | SpO2=%d valid=%d\n",
-                  heartRate, hrValid, spo2, spo2Valid);
-  } else {
-    Serial.printf("[PPG] Notification length too short: %u bytes\n", (unsigned)length);
-  }
-}
+//static void ppgNotifyCallback(
+  //BLERemoteCharacteristic*,
+  //uint8_t* pData,
+  //size_t length,
+  //bool
+//) {
+  //if (length >= 4) {
+    //heartRate = pData[0];
+    //hrValid   = pData[1];
+    //spo2      = pData[2];
+    //spo2Valid = pData[3];
+    //Serial.printf("[PPG] HR=%d valid=%d | SpO2=%d valid=%d\n",
+                  //heartRate, hrValid, spo2, spo2Valid);
+  //} else {
+    //Serial.printf("[PPG] Notification length too short: %u bytes\n", (unsigned)length);
+  //}
+//}
 
 // Spare PPG: server sends BPM as ASCII string (e.g. "72")
 static void spareppgNotifyCallback(
@@ -223,10 +223,7 @@ static void accelNotifyCallback(
 // One-off scan/connect for PPG server. Only prints high-level status.
 bool connectToPPGServer() {
   static unsigned long lastAttemptMs = 0;
-  if (millis() - lastAttemptMs < 5000 && !ppgConnected) {
-    // Avoid spamming attempts/logs tighter than 5 s.
-    return false;
-  }
+  if (millis() - lastAttemptMs < 5000 && !ppgConnected) return false;
   lastAttemptMs = millis();
 
   Serial.println("[BLE] Scanning for PPG server...");
@@ -238,12 +235,14 @@ bool connectToPPGServer() {
     BLEAdvertisedDevice device = foundDevices->getDevice(i);
     if (device.haveServiceUUID() &&
         device.isAdvertisingService(BLEUUID(PPG_SERVICE_UUID))) {
-      Serial.println("[BLE] Found PPG sensor node");
+      Serial.println("[BLE] Found PPG sensor UUID, attempting connect...");
       ppgClient = BLEDevice::createClient();
       if (!ppgClient->connect(&device)) {
         Serial.println("[BLE] PPG connect failed");
         return false;
       }
+      Serial.println("[BLE] ppgClient->connect() returned true");
+
       BLERemoteService* pRemoteService =
         ppgClient->getService(BLEUUID(PPG_SERVICE_UUID));
       if (pRemoteService == nullptr) {
@@ -251,6 +250,7 @@ bool connectToPPGServer() {
         ppgClient->disconnect();
         return false;
       }
+
       ppgRemoteCharacteristic =
         pRemoteService->getCharacteristic(BLEUUID(PPG_CHARACTERISTIC_UUID));
       if (ppgRemoteCharacteristic == nullptr) {
@@ -258,10 +258,31 @@ bool connectToPPGServer() {
         ppgClient->disconnect();
         return false;
       }
+
+      // Enable notifications via CCCD + register callback
       if (ppgRemoteCharacteristic->canNotify()) {
-        //ppgRemoteCharacteristic->registerForNotify(ppgNotifyCallback); // COMMENT-OUT OR UNCOMMENT DEPENDING ON WHETHER YOU ARE USING OUR PPG NODE OR SPARE_PPG NODE
+        Serial.println("[BLE] Enabling notifications for PPG characteristic");
+        BLERemoteDescriptor* cccd = ppgRemoteCharacteristic->getDescriptor(
+            BLEUUID((uint16_t)0x2902));  // CCCD UUID
+        if (cccd) {
+          uint8_t notifyOn[] = {0x01, 0x00};
+          cccd->writeValue(notifyOn, 2);
+          Serial.println("[BLE] CCCD written to enable notifications");
+        } else {
+          Serial.println("[BLE] No CCCD descriptor found, relying on registerForNotify only");
+        }
+
+        // ACTIVE: spare PPG (string BPM)
         ppgRemoteCharacteristic->registerForNotify(spareppgNotifyCallback);
+        // To use original 4-byte PPG node instead, comment the line above
+        // and uncomment the next line:
+        // ppgRemoteCharacteristic->registerForNotify(ppgNotifyCallback);
+
+        Serial.println("[BLE] PPG notify callback registered");
+      } else {
+        Serial.println("[BLE] PPG characteristic cannot notify");
       }
+
       ppgConnected = true;
       Serial.println("[BLE] PPG connected and notifications enabled");
       return true;
@@ -270,6 +291,31 @@ bool connectToPPGServer() {
   Serial.println("[BLE] PPG server not found in scan window");
   return false;
 }
+
+void pollPPGCharacteristic() {
+  if (!ppgConnected || ppgRemoteCharacteristic == nullptr) return;
+
+  // readValue() returns Arduino String here
+  String s = ppgRemoteCharacteristic->readValue();
+  if (s.length() == 0) return;
+
+  s.trim();  // remove whitespace / \r / \n
+
+  int bpm = s.toInt();
+
+  if (bpm > 0) {
+    heartRate = bpm;
+    hrValid   = true;
+    Serial.printf("[PPG_POLL] BPM=%d (from readValue \"%s\")\n", heartRate, s.c_str());
+  } else {
+    hrValid = false;
+    Serial.printf("[PPG_POLL] Invalid BPM string \"%s\"\n", s.c_str());
+  }
+
+  spo2      = 0;
+  spo2Valid = false;
+}
+
 
 
 // One-off scan/connect for ACCEL server. Logs only top-level steps.
@@ -662,6 +708,8 @@ void loop() {
   getToFReading();
 
   if ((millis() - lastTime) > timerDelay) {
+    // Update HR from PPG characteristic first
+    pollPPGCharacteristic();
     if (getSensorReadings()) {
       // BME + PPG + ACCEL SSE updates
       events.send(String(temperature).c_str(), "temperature", millis());
