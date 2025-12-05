@@ -32,6 +32,11 @@
 #include <BLEClient.h>
 #include <BLERemoteCharacteristic.h>
 
+// ======== SD Card Includes ========
+#include <FS.h>
+#include <SD.h>
+#include <SPI.h>
+
 
 // ======== WiFi Configuration ========
 // NOTE: change to your actual network credentials.
@@ -47,6 +52,11 @@ const char* serverURL = "http://172.20.10.4:5050/upload";
 // ======== Web Server and SSE ========
 AsyncWebServer server(80);
 AsyncEventSource events("/events");
+
+// ======== SD Card Setup ========
+// Pick pin on hub used to connect to the CS pin from the microSD breakout
+#define SD_CS 6 
+bool sdReady = false;
 
 
 // ======== BME688 Setup ========
@@ -459,6 +469,43 @@ void initWiFi() {
   }
 }
 
+void initSD() {
+  Serial.print("[INIT] SD card... ");
+  if (!SD.begin(SD_CS)) { //SD.begin(SD_CS) talks to the Adafruit microSD breakout over SPI.
+    Serial.println("FAILED (SD.begin)");
+    sdReady = false;
+    return;
+  }
+
+  uint8_t cardType = SD.cardType();
+  if (cardType == CARD_NONE) {
+    Serial.println("FAILED (no SD card)");
+    sdReady = false;
+    return;
+  }
+
+  sdReady = true;
+  Serial.println("OK");
+
+  // Ensure log file exists and has a header
+  if (!SD.exists("/log.csv")) {
+    File f = SD.open("/log.csv", FILE_WRITE);
+    if (f) {
+      f.println("timestamp_ms,temperature,humidity,pressure,gas,altitude,"
+                "gps_lat,gps_lon,gps_alt,gps_fix,tof_distance,"
+                "hr,hr_valid,spo2,spo2_valid,"
+                "accel_x,accel_y,accel_z,accel_temp");
+      f.close();
+      Serial.println("[SD] Created /log.csv with header");
+    } else {
+      Serial.println("[SD] Failed to create /log.csv");
+    }
+  } else {
+    Serial.println("[SD] /log.csv already exists");
+  }
+}
+
+
 
 // ======== Update OLED Display =========
 void updateDisplay() {
@@ -551,6 +598,7 @@ bool getToFReading() {
 void sendDataToServer() {
   if (!wifiReady || WiFi.status() != WL_CONNECTED) {
     // Silent fail to avoid spam; WiFi status is already logged in init/reconnect.
+    logToSD(); // Still log locally even if WiFi is down
     return;
   }
 
@@ -581,7 +629,51 @@ void sendDataToServer() {
   Serial.print("[HTTP] POST response: ");
   Serial.println(httpResponseCode);
   http.end();
+
+  // Log to SD regardless of server response
+  logToSD();
 }
+
+void logToSD() {
+  if (!sdReady) return;
+
+  File f = SD.open("/log.csv", FILE_APPEND);
+  if (!f) {
+    Serial.println("[SD] Failed to open /log.csv for append");
+    return;
+  }
+
+  // Simple millisecond timestamp; you could replace with real date/time later
+  unsigned long t = millis();
+
+  String line;
+  line.reserve(256);
+  line  = String(t) + ",";
+  line += String(temperature) + ",";
+  line += String(humidity)    + ",";
+  line += String(pressure)    + ",";
+  line += String(gas)         + ",";
+  line += String(altitude)    + ",";
+  line += String(gpsLat, 6)   + ",";
+  line += String(gpsLon, 6)   + ",";
+  line += String(gpsAlt, 2)   + ",";
+  line += String(gpsHasFix ? 1 : 0) + ",";
+  line += String(tofDistance) + ",";
+  line += String(heartRate)   + ",";
+  line += String(hrValid ? 1 : 0) + ",";
+  line += String(spo2)        + ",";
+  line += String(spo2Valid ? 1 : 0) + ",";
+  line += String(accelX)      + ",";
+  line += String(accelY)      + ",";
+  line += String(accelZ)      + ",";
+  line += String(accelTempC);
+
+  f.println(line);
+  f.close();
+
+  Serial.println("[SD] Logged row to /log.csv");
+}
+
 
 
 // ======== HTML + SSE =========
@@ -677,6 +769,7 @@ void setup() {
   initGPS();
   initToF();
   initWiFi();
+  initSD(); 
 
   // HTTP + SSE endpoints
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
