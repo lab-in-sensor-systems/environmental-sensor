@@ -48,7 +48,7 @@ class ServerCallbacks: public BLEServerCallbacks {
 // Setup
 // =========================
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
   delay(1000);
   Serial.println();
   Serial.println("===== SPARE PPG BOOT =====");
