@@ -602,6 +602,9 @@ void sendDataToServer() {
     return;
   }
 
+  Serial.print("[HTTP] Using URL: ");
+  Serial.println(serverURL);
+
   HTTPClient http;
   http.begin(serverURL);
   http.addHeader("Content-Type", "application/x-www-form-urlencoded");
@@ -757,7 +760,7 @@ String processor(const String& var) {
 
 // ======== SETUP =========
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
   delay(1000);
   Serial.println();
   Serial.println("===== ESP32 HUB BOOT =====");
