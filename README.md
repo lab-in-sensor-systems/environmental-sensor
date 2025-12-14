@@ -1,17 +1,17 @@
 # ESP32 Integrated Sensor Node
 
-This repository contains the main firmware for an ESP32-based integrated sensor node.[web:1]
+This repository contains the main firmware for an ESP32-based integrated sensor node.
 
 ## Overview
 
-The main sketch is **`Full_integratedCode.ino`**. It coordinates all system functions, including:[web:1]
+The main sketch is **`Full_integratedCode.ino`**. It coordinates all system functions, including:
 
 - Reading data from the on-board environmental sensor  
 - Driving the OLED display for real-time data
 - Logging data to an SD card  
 - Acting as an ESP32 client to receive data from independent PPG and accelerometer nodes  
 - Streaming all collected data to a web server (SSE)  
-- Storing measurements in a local SQLite database [web:1][web:3]
+- Storing measurements in a local SQLite database
 
 ## Environmental tests data
 
